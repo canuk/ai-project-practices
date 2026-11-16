@@ -203,11 +203,15 @@ given, and fill in the project's values. Keep the execute bit on the scripts
      and scripts, and the agent can edit those.
 6. **The wrapper script.** Copy
    [assets/run-health-audit](assets/run-health-audit) to
-   `bin/run-health-audit`, and set `MAIN` and `SETUP_CMD`. It clones the main
-   branch into `~/health-audit-runs/`, collects the CI history, and runs the
-   agent. Then it checks that a scorecard was committed and that no CI
-   configuration changed. If both checks pass, it pushes one fixed branch name,
-   opens the pull request, and deletes the clone. The agent never pushes.
+   `bin/run-health-audit`, and set `MAIN` and `SETUP_CMD`. It collects the CI
+   history, clones the main branch into `~/health-audit-runs/` with no remote,
+   and runs the agent there. Afterwards it never runs git in the agent's clone,
+   because the agent could have planted hooks or config in it. It fetches the
+   branch into a second, clean clone and checks it there: the branch starts
+   from main, it holds a scorecard, and it changes no CI config, hook folder,
+   audit config or wrapper. Only then does it push one fixed branch name with
+   hooks off, open the pull request, and delete both clones. The agent never
+   pushes.
 7. **The scheduler.** Run the wrapper once a day on a build box with cron, for
    example `0 2 * * * cd /path/to/repo && bin/run-health-audit >> ~/health-audit-cron.log 2>&1`.
    It does nothing outside days 1 to 7 or once the month's branch is pushed, so
