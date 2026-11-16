@@ -148,10 +148,16 @@ if ! "${SAFE_GIT[@]}" cat-file -e "$branch:$scorecard" 2>/dev/null; then
   exit 1
 fi
 
-changed=$("${SAFE_GIT[@]}" diff --name-only "origin/$MAIN" "$branch")
-if refused=$(grep -E "$REFUSE_PATHS" <<<"$changed"); then
+# -z gives raw, NUL-separated paths (no quoting of unusual names), and
+# --no-renames lists both sides of a rename, so a file moved out of a refused
+# folder still shows up.
+refused=()
+while IFS= read -r -d '' path; do
+  [[ "$path" =~ $REFUSE_PATHS ]] && refused+=("$path")
+done < <("${SAFE_GIT[@]}" diff --name-only -z --no-renames "origin/$MAIN" "$branch")
+if (( ${#refused[@]} > 0 )); then
   echo "health-audit: the run changed paths it must not touch. Nothing pushed. Review $clone by hand. See $log." >&2
-  echo "$refused" >&2
+  printf '  %q\n' "${refused[@]}" >&2
   exit 1
 fi
 
