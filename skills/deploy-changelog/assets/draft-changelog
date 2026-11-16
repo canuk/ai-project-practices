@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# Drafts one changelog entry for the changes since the last deploy, with a
+# headless agent and the changelog prompt. Prints the YAML entry, or NONE.
+#
+# The deploy script runs it in the background and waits for it. It never waits
+# on the agent for longer than CHANGELOG_DRAFT_TIMEOUT seconds (default 90).
+# When the agent is missing, logged out or slow, it exits non-zero with the
+# reason on stderr, and the deploy offers an empty entry or skip.
+#
+# It relies on two conventions from the deploy-changelog skill:
+#   - each deploy is tagged (TAG_PATTERN, default production-*);
+#   - each changelog commit's subject starts with "Changelog: ".
+#
+# Usage: bin/draft-changelog                                  since the last deploy
+#        bin/draft-changelog --since 2025-01-01 --until 2025-01-31 --date 2025-01-31   backfill
+#
+# Fill in: BASE_REF, TAG_PATTERN, PROMPT. The agent command near the end is for
+# Claude Code. Use your agent's headless mode if it is different.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+BASE_REF="${BASE_REF:-origin/main}"
+TAG_PATTERN="${TAG_PATTERN:-production-*}"
+PROMPT="${PROMPT:-.agents/prompts/changelog.md}"
+
+since="" until="" entry_date=$(date +%Y-%m-%d)
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --since|--until|--date)
+      [[ $# -ge 2 ]] || { echo "draft-changelog: $1 needs a date (YYYY-MM-DD)." >&2; exit 2; }
+      case "$1" in --since) since="$2" ;; --until) until="$2" ;; --date) entry_date="$2" ;; esac
+      shift 2 ;;
+    *) echo "draft-changelog: unknown option $1" >&2; exit 2 ;;
+  esac
+done
+if [[ -n "$until" && -z "$since" ]]; then
+  echo "draft-changelog: --until needs --since." >&2
+  exit 2
+fi
+
+for tool in git gh claude; do
+  command -v "$tool" >/dev/null || { echo "draft-changelog: $tool is not on PATH." >&2; exit 1; }
+done
+
+git fetch -q --tags origin
+
+if [[ -n "$since" ]]; then
+  log_args=(--since "$since" ${until:+--until "$until 23:59"} "$BASE_REF")
+else
+  # Start after the newest of: the last deploy tag, the last "Changelog:" commit.
+  # A deploy that failed after its entry was pushed is then not described twice.
+  # Match the subject only. A pull request body may also contain "Changelog:".
+  tag=$(git describe --tags --abbrev=0 --match "$TAG_PATTERN" "$BASE_REF" 2>/dev/null || true)
+  last_entry=$(git log --first-parent --format='%H %s' "$BASE_REF" | awk '$2 == "Changelog:" { print $1; exit }')
+  base="$tag"
+  if [[ -n "$last_entry" ]] && { [[ -z "$tag" ]] || git merge-base --is-ancestor "$tag" "$last_entry"; }; then
+    base="$last_entry"
+  fi
+  if [[ -z "$base" ]]; then
+    echo "draft-changelog: no deploy tag and no Changelog: commit yet. Run once with --since YYYY-MM-DD." >&2
+    exit 1
+  fi
+  log_args=("$base..$BASE_REF")
+fi
+
+facts=$(mktemp) prompt=$(mktemp) reply=$(mktemp)
+trap 'rm -f "$facts" "$prompt" "$reply"' EXIT
+
+# First-parent history: one line per merged pull request on the main branch.
+# Merge commits ("Merge pull request #12 ...") and squash merges ("Title (#12)")
+# both pull in the pull request's description. `|| true` after grep: an empty
+# range makes grep exit 1, and pipefail would turn "nothing to describe" into a
+# failure.
+git log --first-parent --format='%s' "${log_args[@]}" | { grep -v '^Changelog: ' || true; } | while read -r subject; do
+  number=""
+  if [[ "$subject" =~ ^Merge\ pull\ request\ \#([0-9]+) ]]; then
+    number="${BASH_REMATCH[1]}"
+  elif [[ "$subject" =~ \(\#([0-9]+)\)$ ]]; then
+    number="${BASH_REMATCH[1]}"
+  fi
+  if [[ -n "$number" ]]; then
+    gh pr view "$number" --json title,body --jq '"## " + .title + "\n" + (.body // "" | .[0:1500]) + "\n"' ||
+      echo "- $subject"
+  else
+    echo "- $subject"
+  fi
+done > "$facts"
+
+if [[ ! -s "$facts" ]]; then
+  echo "NONE"
+  exit 0
+fi
+
+{ cat "$PROMPT"; echo; echo "Entry date: $entry_date"; echo; cat "$facts"; } > "$prompt"
+
+# --tools "" turns off every built-in tool and --strict-mcp-config starts no MCP
+# servers, so the model only writes text.
+claude -p --tools "" --strict-mcp-config --output-format text < "$prompt" > "$reply" &
+pid=$!
+limit="${CHANGELOG_DRAFT_TIMEOUT:-90}"
+for ((waited = 0; waited < limit; waited++)); do
+  kill -0 "$pid" 2>/dev/null || break
+  sleep 1
+done
+if kill -0 "$pid" 2>/dev/null; then
+  pkill -TERM -P "$pid" 2>/dev/null || true
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  echo "draft-changelog: the agent ran for more than ${limit} seconds. This script stopped it." >&2
+  exit 1
+fi
+if wait "$pid"; then
+  # A model sometimes wraps the YAML in a code fence anyway. Drop fence lines.
+  grep -v '^```' "$reply" || true
+else
+  status=$?
+  echo "draft-changelog: the agent failed (exit $status): $(tail -3 "$reply")" >&2
+  exit 1
+fi

@@ -1,0 +1,12 @@
+{
+  "name": "ai-project-practices",
+  "description": "Skills and an agent for running a software project with AI coding assistants.",
+  "owner": { "name": "canuk", "url": "https://github.com/canuk" },
+  "plugins": [
+    {
+      "name": "project-practices",
+      "source": "./",
+      "description": "Rules that enforce themselves, a scheduled health audit, a test audit, a deploy-time changelog, and a first-run setup skill."
+    }
+  ]
+}

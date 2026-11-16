@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# Prints "<date> <days>" for the newest health audit scorecard on the current
+# checkout: the date in its front matter, and how many days ago that was.
+# Prints "none 9999" when there is no scorecard yet, so the alarm fires until
+# the first scorecard is merged.
+#
+# The date math uses python3, which every CI runner has, because GNU date and
+# BSD date (macOS) parse dates with different flags.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+dir="${AUDIT_DIR:-docs/audits/health}"
+newest=""
+for f in "$dir"/[0-9][0-9][0-9][0-9]-[0-9][0-9].md; do
+  [[ -e "$f" ]] || continue
+  # Accepts date: 2026-12-07 and date: "2026-12-07".
+  d=$(sed -n 's/^date:[[:space:]]*["'\'']\{0,1\}\([0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}\).*/\1/p' "$f" | head -1)
+  if [[ -z "$d" ]]; then
+    echo "audit-age: $f has no date: line. Skipped." >&2
+    continue
+  fi
+  [[ -z "$newest" || "$d" > "$newest" ]] && newest="$d"
+done
+
+if [[ -z "$newest" ]]; then
+  echo "none 9999"
+  exit 0
+fi
+
+days=$(python3 -c 'import datetime,sys; print((datetime.date.today() - datetime.date.fromisoformat(sys.argv[1])).days)' "$newest")
+echo "$newest $days"

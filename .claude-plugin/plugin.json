@@ -1,0 +1,10 @@
+{
+  "name": "project-practices",
+  "version": "0.1.0",
+  "description": "Run a software project with AI coding agents for the long term: rules that enforce themselves, a scheduled health audit with an alarm, a test audit that proves every finding, a changelog written at deploy time, and a first-run skill that sets it all up.",
+  "author": { "name": "canuk", "url": "https://github.com/canuk" },
+  "homepage": "https://github.com/canuk/ai-project-practices",
+  "repository": "https://github.com/canuk/ai-project-practices",
+  "license": "MIT",
+  "keywords": ["practices", "adr", "guard-tests", "health-audit", "test-audit", "changelog", "agents"]
+}

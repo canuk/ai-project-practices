@@ -1,0 +1,44 @@
+# The alarm for the monthly health audit. It runs on GitHub's own runners, not
+# on the machine that runs the audit, so it still fires when that machine, its
+# scheduler or its agent login is broken. It reads the default branch, so a
+# scorecard counts only once its pull request is merged.
+name: Health audit overdue
+
+on:
+  schedule:
+    - cron: "0 15 * * 1" # every Monday
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the newest scorecard
+        id: age
+        run: |
+          read date days < <(bin/audit-age)
+          echo "date=$date" >> "$GITHUB_OUTPUT"
+          echo "days=$days" >> "$GITHUB_OUTPUT"
+
+      - name: Open an issue and fail when overdue
+        if: fromJSON(steps.age.outputs.days) > 40
+        # Step outputs reach the shell through env, never as expressions inside
+        # run:, so a value can never be parsed as shell code.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          AUDIT_DATE: ${{ steps.age.outputs.date }}
+          AUDIT_DAYS: ${{ steps.age.outputs.days }}
+        run: |
+          if [ -z "$(gh issue list --state open --search 'Health audit overdue in:title' --json number --jq '.[].number')" ]; then
+            gh issue create \
+              --title "Health audit overdue (last: $AUDIT_DATE)" \
+              --body "The newest merged scorecard in docs/audits/health/ is $AUDIT_DAYS days old. Check the audit machine's log, its scheduler and its agent login, then run the audit by hand. If a scorecard pull request is waiting, merge it."
+          fi
+          echo "Health audit overdue: last scorecard $AUDIT_DATE ($AUDIT_DAYS days)." >&2
+          exit 1

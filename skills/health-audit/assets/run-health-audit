@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# Runs the monthly health audit unattended.
+#
+# A scheduler starts this once a day. It does nothing outside days 1-7 of the
+# month, and nothing once this month's branch is pushed. So a missed day is
+# retried the next day, and a month runs once.
+#
+# It makes a fresh clone of the main branch outside the repository, collects
+# the CI history the agent needs, and starts the agent headless: restricted
+# mode, the OS sandbox, the project's copy of the checklist and an exact tool
+# allowlist. The agent has no GitHub token and cannot push. This script pushes
+# one fixed branch name after the agent exits, and only if the run committed a
+# scorecard and touched no CI configuration.
+#
+# Usage: bin/run-health-audit         scheduled run
+#        bin/run-health-audit --now   run now, any day
+#
+# Before the first run, commit to the main branch:
+#   .agents/skills/health-audit/SKILL.md      the checklist, adapted to this project
+#   .agents/health-audit.settings.json        the allowlist and sandbox settings
+#
+# Fill in: MAIN and SETUP_CMD. The agent command is for Claude Code. Use your
+# agent's headless mode if it is different, and keep the same restrictions.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+MAIN="${MAIN:-main}"
+SETUP_CMD="${SETUP_CMD:-true}"   # for example: npm ci, bundle install, uv sync
+CHECKLIST=".agents/skills/health-audit/SKILL.md"
+SETTINGS=".agents/health-audit.settings.json"
+RUNS_DIR="${RUNS_DIR:-$HOME/health-audit-runs}"
+LOG_DIR="${LOG_DIR:-$HOME/health-audit-logs}"
+CI_PATHS='^(\.github/|\.gitlab-ci|\.circleci/|azure-pipelines|Jenkinsfile|\.buildkite/|\.audit-input/)'
+
+# A scheduler starts with a bare PATH. Put the tool paths in this file.
+[[ -f "$HOME/.health-audit.env" ]] && source "$HOME/.health-audit.env"
+
+if [[ "${1:-}" != "--now" ]] && (( 10#$(date +%d) > 7 )); then
+  exit 0
+fi
+
+for tool in git gh claude; do
+  command -v "$tool" >/dev/null || { echo "health-audit: $tool is not on PATH. Fix ~/.health-audit.env." >&2; exit 1; }
+done
+
+month=$(date +%Y-%m)
+branch="health-audit-$month"
+origin_url=$(git remote get-url origin)
+clone="$RUNS_DIR/$(basename "$origin_url" .git)-$month"
+scorecard="docs/audits/health/$month.md"
+mkdir -p "$RUNS_DIR" "$LOG_DIR"
+log="$LOG_DIR/health-audit-$month.log"
+
+# The pull request body is the scorecard without its front matter.
+open_pr() { # $1: git ref that holds the scorecard
+  local body
+  body=$(mktemp)
+  git show "$1:$scorecard" | awk 'NR == 1 && $0 == "---" { inside = 1; next }
+                                 inside && $0 == "---" { inside = 0; next }
+                                 !inside' > "$body"
+  gh pr create --base "$MAIN" --head "$branch" --title "Health audit $month" --body-file "$body"
+  rm -f "$body"
+}
+
+if git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
+  # This month's run already pushed. Open its pull request if an earlier
+  # attempt failed to.
+  if [[ -z "$(gh pr list --head "$branch" --state all --json number --jq '.[].number')" ]]; then
+    git fetch -q origin "$branch"
+    open_pr "origin/$branch"
+  fi
+  exit 0
+fi
+if [[ -d "$clone" ]]; then
+  echo "health-audit: $clone exists but $branch was never pushed, so a run failed. Read $log, then delete $clone to run again." >&2
+  exit 1
+fi
+
+# A clone, not a worktree: the sandbox lets the agent write only inside its
+# working directory, and a worktree keeps its git data in the parent repository.
+git clone -q --branch "$MAIN" "$origin_url" "$clone"
+cd "$clone"
+git switch -q -c "$branch"
+for f in "$CHECKLIST" "$SETTINGS"; do
+  [[ -f "$f" ]] || { echo "health-audit: $f is not on $MAIN. Commit it first." >&2; exit 1; }
+done
+bash -c "$SETUP_CMD" > "$LOG_DIR/health-audit-$month.setup.log" 2>&1 || {
+  echo "health-audit: setup failed. See $LOG_DIR/health-audit-$month.setup.log." >&2
+  exit 1
+}
+
+# The agent has no GitHub access, so collect the CI history for it here.
+mkdir -p .audit-input
+echo ".audit-input/" >> .git/info/exclude
+gh run list --branch "$MAIN" --limit 30 --json conclusion,createdAt,databaseId,headSha,name,status \
+  > .audit-input/ci-runs.json 2>&1 || echo "not checked: gh run list failed" > .audit-input/ci-runs.json
+for id in $(gh run list --branch "$MAIN" --limit 3 --json databaseId --jq '.[].databaseId' 2>/dev/null); do
+  gh run view "$id" --json jobs --jq '.jobs[] | [.name, .startedAt, .completedAt, .conclusion] | @tsv' 2>/dev/null
+done > .audit-input/ci-timing.tsv || true
+
+# --restricted ignores user, project and local settings files, keeps --settings,
+# and confines the file tools to this clone. The settings file turns on the OS
+# sandbox, which confines Bash writes to this clone and blocks reads of the
+# secret paths it lists. --strict-mcp-config starts no MCP servers. --tools
+# names the only built-in tools. --permission-mode dontAsk refuses anything the
+# allowlist does not name, without asking. Check these flags against
+# `claude --help` for your version. A non-zero exit from the agent does not
+# stop this script. The checks below decide.
+claude -p "Read $CHECKLIST and run the health audit it describes, from step 0. You are already on branch $branch. The CI history is in .audit-input/." \
+  --restricted \
+  --strict-mcp-config \
+  --tools "Bash,Read,Edit,Write,Glob,Grep" \
+  --permission-mode dontAsk \
+  --settings "$SETTINGS" \
+  --output-format text \
+  > "$log" 2>&1 || echo "health-audit: the agent exited with an error. See $log." >&2
+
+if ! git cat-file -e "HEAD:$scorecard" 2>/dev/null; then
+  echo "health-audit: the run committed no scorecard. Nothing pushed. See $log." >&2
+  exit 1
+fi
+
+current=$(git rev-parse --abbrev-ref HEAD)
+if [[ "$current" != "$branch" ]]; then
+  echo "health-audit: the run left the clone on $current, not $branch. Nothing pushed. See $log." >&2
+  exit 1
+fi
+
+# A pushed branch runs CI from its own copy of the CI config. Never push a run
+# that changed it, or that committed the collected input.
+if git diff --name-only "origin/$MAIN..HEAD" | grep -Eq "$CI_PATHS"; then
+  echo "health-audit: the run changed CI configuration or committed .audit-input/. Nothing pushed. Review $clone by hand. See $log." >&2
+  exit 1
+fi
+
+git push -q -u origin "$branch"
+pr_url=$(open_pr HEAD)
+
+# The branch is pushed, so the clone holds nothing that is not on the remote.
+cd /
+rm -rf "$clone"
+
+echo "health-audit: finished. Pull request: $pr_url. Log: $log"

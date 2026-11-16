@@ -1,0 +1,49 @@
+{
+  "permissions": {
+    "allow": [
+      "Read(./**)", "Edit(./**)", "Glob", "Grep",
+
+      "Bash(git status *)", "Bash(git status)", "Bash(git diff *)", "Bash(git log *)",
+      "Bash(git show *)", "Bash(git rev-parse *)", "Bash(git ls-files *)",
+      "Bash(git merge-base *)", "Bash(git tag --list *)",
+      "Bash(git add *)", "Bash(git rm *)", "Bash(git commit *)", "Bash(git restore *)",
+
+      "Bash(REPLACE: your test command *)",
+      "Bash(REPLACE: your lint command *)",
+      "Bash(REPLACE: your security scan *)",
+      "Bash(REPLACE: your dependency audit *)",
+      "Bash(REPLACE: your outdated-dependencies command *)",
+
+      "Bash(sort)", "Bash(sort -rn)", "Bash(uniq -c)", "Bash(head *)", "Bash(tail *)",
+      "Bash(wc *)", "Bash(ls *)", "Bash(date +%Y-%m-%d)"
+    ],
+    "deny": [
+      "Edit(.github/**)", "Edit(.agents/**)",
+      "Bash(git *--output*)", "Bash(git *--no-index*)", "Bash(git *-F *)", "Bash(git *--file*)",
+      "Bash(git push *)", "Bash(git -c *)", "Bash(git -C *)", "Bash(git config *)",
+      "Bash(git remote *)", "Bash(git fetch *)", "Bash(git switch *)", "Bash(git checkout *)",
+      "Bash(gh *)", "Bash(ssh *)", "Bash(scp *)", "Bash(rm *)", "Bash(find *)",
+      "Bash(curl *)", "Bash(wget *)", "Bash(xargs *)",
+      "Bash(REPLACE: your deploy command *)",
+      "Bash(REPLACE: your database console *)",
+      "Bash(REPLACE: your app console or script runner *)"
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false,
+    "excludedCommands": [],
+    "filesystem": {
+      "denyRead": [
+        "~/.ssh", "~/.aws", "~/.config", "~/.gnupg", "~/.netrc", "~/.npmrc",
+        "~/.pypirc", "~/.docker", "~/.kube", "~/.health-audit.env",
+        "REPLACE: any other path on this machine that holds a secret"
+      ]
+    },
+    "network": {
+      "allowedDomains": ["REPLACE: your package registry, for example registry.npmjs.org"],
+      "strictAllowlist": true
+    }
+  }
+}
